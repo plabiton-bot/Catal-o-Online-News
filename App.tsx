@@ -1,6 +1,7 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { TabType, ResultTabType, FormData, GeneratedArticle } from './types';
 import { generateArticle } from './services/geminiService';
+import { supabase } from './services/supabaseClient';
 import { 
   Newspaper, 
   Flame, 
@@ -13,7 +14,10 @@ import {
   Power,
   Image as ImageIcon,
   X,
-  Upload
+  Upload,
+  History,
+  Clock,
+  ChevronRight
 } from 'lucide-react';
 
 const INITIAL_FORM_DATA: FormData = {
@@ -45,6 +49,11 @@ export default function App() {
   const [result, setResult] = useState<GeneratedArticle | null>(null);
   const [activeResultTab, setActiveResultTab] = useState<ResultTabType>('site');
   const [copied, setCopied] = useState(false);
+  
+  // Supabase State
+  const [showHistory, setShowHistory] = useState(false);
+  const [historyItems, setHistoryItems] = useState<any[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
@@ -74,6 +83,77 @@ export default function App() {
     }));
   };
 
+  const saveToSupabase = async (article: GeneratedArticle, data: FormData, type: string) => {
+    try {
+      // Remove images from data to avoid payload too large errors in DB jsonb column
+      const { images, ...dataWithoutImages } = data;
+
+      const { error } = await supabase
+        .from('articles')
+        .insert([
+          {
+            title: article.title,
+            body: article.body,
+            instagram_content: article.instagramContent,
+            category: type,
+            original_data: dataWithoutImages
+          }
+        ]);
+
+      if (error) {
+        console.error('Erro ao salvar no Supabase:', error);
+        
+        // Verifica erro de permissão (RLS Policy Violation)
+        if (error.code === '42501' || error.message.includes('violates row-level security')) {
+            alert(`Segurança: O banco de dados bloqueou a gravação.\n\nVocê precisa rodar o script de políticas de segurança (RLS) no painel do Supabase para permitir inserções.`);
+        } else {
+            alert(`Atenção: A matéria foi gerada, mas houve um erro ao salvar no histórico: ${error.message}`);
+        }
+      }
+    } catch (err) {
+      console.error('Erro de conexão ao salvar:', err);
+    }
+  };
+
+  const fetchHistory = async () => {
+    setLoadingHistory(true);
+    try {
+      const { data, error } = await supabase
+        .from('articles')
+        .select('*')
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (error) throw error;
+      setHistoryItems(data || []);
+    } catch (err: any) {
+      console.error('Erro ao buscar histórico:', err);
+      setHistoryItems([]);
+      
+      if (err.code === '42501' || err.message?.includes('violates row-level security')) {
+        alert('Erro de Permissão: Você precisa configurar as Políticas de Segurança (RLS) no Supabase para visualizar o histórico.\n\nConsulte o arquivo supabase_security.sql.');
+      } else {
+        alert('Não foi possível carregar o histórico. Verifique a conexão ou se a tabela existe.');
+      }
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
+  const loadFromHistory = (item: any) => {
+    setResult({
+      title: item.title,
+      body: item.body,
+      instagramContent: item.instagram_content
+    });
+    // Restore form data if needed, but primarily show result
+    if (item.original_data) {
+      setFormData(prev => ({...prev, ...item.original_data, images: []}));
+    }
+    setActiveTab(item.category as TabType || 'geral');
+    setShowHistory(false);
+  };
+
   const handleGenerate = async () => {
     if (!process.env.API_KEY) {
       alert("Erro: API Key não configurada no ambiente.");
@@ -92,6 +172,10 @@ export default function App() {
     try {
       const article = await generateArticle(activeTab, formData);
       setResult(article);
+      
+      // Save to Supabase implicitly
+      await saveToSupabase(article, formData, activeTab);
+      
     } catch (error) {
       alert(error instanceof Error ? error.message : "Erro desconhecido");
     } finally {
@@ -135,16 +219,30 @@ export default function App() {
             </div>
           </div>
           
-          {/* NEW: Instagram Link */}
-          <a 
-            href="https://instagram.com/catalaonlineoficial" 
-            target="_blank" 
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 text-brand-green font-semibold hover:text-[#8bb335] transition-colors bg-green-50 px-3 py-1.5 sm:px-4 sm:py-2 rounded-full border border-green-100 hover:border-green-200"
-          >
-            <Instagram size={18} className="sm:w-5 sm:h-5" />
-            <span className="hidden sm:inline text-sm">@catalaonlineoficial</span>
-          </a>
+          <div className="flex items-center gap-2">
+            {/* History Button */}
+            <button
+              onClick={() => {
+                setShowHistory(true);
+                fetchHistory();
+              }}
+              className="p-2 text-gray-500 hover:text-brand-green hover:bg-green-50 rounded-full transition-colors relative"
+              title="Histórico de Notícias"
+            >
+              <History size={20} />
+            </button>
+
+            {/* Instagram Link */}
+            <a 
+              href="https://instagram.com/catalaonlineoficial" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-brand-green font-semibold hover:text-[#8bb335] transition-colors bg-green-50 px-3 py-1.5 sm:px-4 sm:py-2 rounded-full border border-green-100 hover:border-green-200"
+            >
+              <Instagram size={18} className="sm:w-5 sm:h-5" />
+              <span className="hidden sm:inline text-sm">@catalaonlineoficial</span>
+            </a>
+          </div>
         </div>
       </header>
 
@@ -583,6 +681,63 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* History Modal */}
+      {showHistory && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl max-h-[80vh] flex flex-col">
+            <div className="p-4 border-b border-gray-100 flex justify-between items-center">
+              <h3 className="font-bold text-xl text-brand-dark flex items-center gap-2">
+                <History className="text-brand-green" />
+                Histórico de Matérias
+              </h3>
+              <button 
+                onClick={() => setShowHistory(false)}
+                className="p-1 hover:bg-gray-100 rounded-full text-gray-500"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div className="overflow-y-auto p-4 flex-grow">
+              {loadingHistory ? (
+                <div className="flex justify-center py-8">
+                  <Loader2 className="animate-spin text-brand-green" size={32} />
+                </div>
+              ) : historyItems.length === 0 ? (
+                <div className="text-center py-10 text-gray-400">
+                  <Clock size={48} className="mx-auto mb-3 opacity-20" />
+                  <p>Nenhuma matéria salva ainda.</p>
+                  <p className="text-sm mt-2">Certifique-se que a tabela "articles" existe no Supabase.</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {historyItems.map((item) => (
+                    <button 
+                      key={item.id}
+                      onClick={() => loadFromHistory(item)}
+                      className="w-full text-left bg-gray-50 hover:bg-gray-100 p-4 rounded-xl transition-all border border-gray-100 hover:border-brand-green/30 group relative"
+                    >
+                      <div className="flex justify-between items-start">
+                        <div className="pr-4">
+                           <span className="inline-block text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">
+                            {new Date(item.created_at).toLocaleDateString('pt-BR')} • {item.category}
+                           </span>
+                           <h4 className="font-semibold text-brand-dark line-clamp-2 leading-tight">
+                             {item.title || "Sem título"}
+                           </h4>
+                        </div>
+                        <ChevronRight className="text-gray-300 group-hover:text-brand-green transition-colors" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
